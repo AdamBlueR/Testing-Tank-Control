@@ -1,0 +1,267 @@
+#include <Wire.h>
+#include "Arduino_I2C_ESC.h"
+#include <SoftwareSerial.h>
+
+
+#define ESC_ADDRESS 0x29
+#define ESC_ADDRESS2 0x29+1
+#define ESC_ADDRESS3 0x29+2
+#define ESC_ADDRESS4 0x29+3
+#define ESC_ADDRESS5 0x29+4
+#define ESC_ADDRESS6 0x29+5
+#define ESC_ADDRESS7 0x29+6
+#define ESC_ADDRESS8 0x29+7
+
+Arduino_I2C_ESC motor[] = { Arduino_I2C_ESC(ESC_ADDRESS),
+                             Arduino_I2C_ESC(ESC_ADDRESS2), 
+                             Arduino_I2C_ESC(ESC_ADDRESS3),
+                             Arduino_I2C_ESC(ESC_ADDRESS4),
+                             Arduino_I2C_ESC(ESC_ADDRESS5),
+                             Arduino_I2C_ESC(ESC_ADDRESS6),
+                             Arduino_I2C_ESC(ESC_ADDRESS7),
+                             Arduino_I2C_ESC(ESC_ADDRESS8) };
+
+const int numMotors = 8;
+volatile long signal[numMotors];
+char prefix;
+int ID;
+int pushButton = 3;
+int pushButton1 = 4;
+int pushButton2 = 5;
+int pushButton3 = 6;
+volatile int STOP;
+bool buttonPushed;
+float curr[numMotors];
+float tau = 20; //time constant 
+float a = (0.1/(0.1+tau));
+
+long lcdTimer;
+long lowpassTimer;
+long updateTimer;
+
+// Attach the serial display's RX line to digital pin 7
+SoftwareSerial mySerial(3,7); // pin 7 = TX, pin 3 = RX (unused)
+
+void setup() {
+
+  pinMode(pushButton, INPUT);
+  pinMode(pushButton1, INPUT);
+  pinMode(pushButton2, INPUT);
+  pinMode(pushButton3, INPUT);
+  
+  pinMode(2, INPUT);     // Pin 2 is input to which a switch is connected = INT0
+  digitalWrite(2, HIGH);
+  pinMode(3, INPUT);     // Pin 3 is input to which a switch is connected 
+  digitalWrite(3, HIGH);
+  pinMode(4, INPUT);     // Pin 4 is input to which a switch 1 is connected 
+  digitalWrite(4, HIGH);
+  pinMode(5, INPUT);     // Pin 5 is input to which a switch 2 is connected 
+  digitalWrite(5, HIGH);
+  pinMode(6, INPUT);     // Pin 6 is input to which a switch 3 is connected 
+  digitalWrite(6, HIGH);
+  attachInterrupt(0, estop, FALLING);
+  
+  Serial.begin(57600);
+  Serial.println("Starting");
+  
+  Wire.begin();
+
+  mySerial.begin(9600); // set up serial port for 9600 baud
+  delay(500); // wait for display to boot up
+
+  mySerial.write(0xFE); //command flag
+  mySerial.write(157); // 0x0C
+ 
+  //this function takes an int between 128-157 and turns the backlight on accordingly
+  mySerial.write(0x7C); //NOTE THE DIFFERENT COMMAND FLAG = 124 dec
+  mySerial.write(157); // any value between 128 and 157 or 0x80 and 0x9D
+
+  signal[0] = 0;
+  signal[1] = 0;
+  signal[2] = 0;
+  signal[3] = 0;
+  signal[4] = 0;
+  signal[5] = 0;
+  signal[6] = 0;
+  signal[7] = 0;
+    
+ 
+}
+
+
+void loop() {
+  if ( millis() - updateTimer > 100 ) {
+    updateTimer = millis();
+    updateMotors();
+  }
+   
+  int buttonState = digitalRead(pushButton);
+  int buttonState1 = digitalRead(pushButton1);
+  int buttonState2 = digitalRead(pushButton2);
+  int buttonState3 = digitalRead(pushButton3);
+  
+
+  if ( buttonState == 0 ||
+       buttonState1 == 0 ||
+       buttonState2 == 0 ||
+       buttonState3 == 0 ) {
+    buttonPushed = true;
+  }
+  
+  // print out the state of the button:
+  Serial.println(buttonState);
+  Serial.println(buttonState1);
+  Serial.println(buttonState2);
+  Serial.println(buttonState3);
+ 
+  delay(1);        // delay in between reads for stability
+
+  if (motor[ID].isAlive()){
+    if (buttonState2 == 0 ) signal[ID] = signal[ID]+1023;
+    if (buttonState3 == 0 ) signal[ID] = signal[ID]-1023;
+    if (buttonState2 == 0 && buttonState3 == 0) signal[ID] = 0;
+    if (signal[ID] > 32767){
+      signal[ID] = 32767;
+    }
+    if (signal[ID] < -32767){
+      signal[ID] = -32767;
+    }
+  }
+  
+  
+  if ( Serial.available() > 0  ) {         //Legacy serial monitor control
+    prefix = Serial.read();
+    if( prefix == 'a' ){
+      signal[0] = Serial.parseInt();
+    } else if (prefix =='b'){
+      signal[1] = Serial.parseInt();
+    } else if (prefix =='c'){
+      signal[0] = Serial.parseInt();
+      signal[1] = signal[0];
+    } else if (prefix =='s'){
+      for ( byte i = 0 ; i < numMotors ; i++ ) {
+        signal[i] = 0;
+      }                                  //End legacy
+    }
+  }
+  
+  if ( millis() - lowpassTimer > 100 ) {
+    lowpassTimer = millis();
+    curr[ID] = (curr[ID]*(1-a))+(motor[ID].current()*a);
+  }
+
+
+  Serial.print("ESC1: ");
+  if(motor[0].isAlive()) Serial.print("OK\t\t"); 
+  else Serial.print("NA1\t\t");
+  Serial.print(signal[0]);Serial.print(" \t\t");  
+  Serial.print(motor[0].rpm());Serial.print(" RPM1\t\t");
+  Serial.print(motor[0].voltage());Serial.print(" V1\t\t");
+  Serial.print(motor[0].current());Serial.print(" A1\t\t");
+  Serial.print(motor[0].temperature());Serial.print(" `C1");
+  Serial.println();
+
+  Serial.print("ESC2: ");
+  if(motor[1].isAlive()) Serial.print("OK\t\t"); 
+  else Serial.print("NA2\t\t");
+  Serial.print(signal[1]);Serial.print(" \t\t");  
+  Serial.print(motor[1].rpm());Serial.print(" RPM2\t\t");
+  Serial.print(motor[1].voltage());Serial.print(" V2\t\t");
+  Serial.print(motor[1].current());Serial.print(" A2\t\t");
+  Serial.print(motor[1].temperature());Serial.print(" `C2");
+  Serial.println();
+
+  if (buttonState == 0)  ID = ID+1;
+  if (buttonState1 == 0) ID = ID-1;
+  if (ID >= 8 && buttonState == 0) (ID = 0);
+  if (ID <= -1 && buttonState1 == 0) (ID = 7);
+
+  if (STOP == 1){
+    executeStop();
+  }
+
+  if ( millis() - lcdTimer > 500 ) {
+    lcdTimer = millis();
+    
+    mySerial.write(254); // move cursor to beginning of first line
+    mySerial.write(128);
+  
+    mySerial.write("                "); // clear display
+    mySerial.write("                ");
+  
+    mySerial.write(254); // move cursor to beginning of first line
+    mySerial.write(128);
+    
+    mySerial.write("M"); mySerial.print(ID); mySerial.write(" ");
+  
+    if (motor[ID].isAlive()){
+    if (motor[ID].rpm()<1000) mySerial.print('0');
+    if (motor[ID].rpm()<100) mySerial.print('0');
+    if (motor[ID].rpm()<10) mySerial.print('0');
+    mySerial.print (motor[ID].rpm());mySerial.write("RPM ");   
+    if (curr[ID]<10) mySerial.print('0');  
+    mySerial.print (fabs((curr[ID])),1);mySerial.write("A");
+    
+    mySerial.write(254); 
+    mySerial.write(192);
+  
+    mySerial.print ((motor[ID].voltage()));mySerial.write("V ");
+    mySerial.print (motor[ID].temperature(),0);mySerial.write("C ");
+    if (signal[ID]>0) mySerial.print("-");
+      else if (signal[ID] <=0) mySerial.print(" ");
+    if (fabs(signal[ID])/327.67<97) mySerial.print('0');
+    if (fabs(signal[ID])/327.67<10) mySerial.print('0');
+    if (signal[ID]>=0) mySerial.print (signal[ID]/327.67,0);
+    if (signal[ID]<0) mySerial.print (signal[ID]/-327.67,0);mySerial.write("%");
+    }else{ 
+    mySerial.write("Not Found");
+
+    mySerial.write(254); 
+    mySerial.write(192);
+
+    mySerial.write("Check connection");
+    }  
+  } 
+  if ( buttonPushed ) {
+    buttonPushed = false;
+    delay(300);
+  }
+} 
+
+void estop(){
+  signal[0] = 0; 
+  signal[1] = 0;
+  signal[2] = 0; 
+  signal[3] = 0;
+  signal[4] = 0; 
+  signal[5] = 0;
+  signal[6] = 0; 
+  signal[7] = 0;
+  if (STOP == 0) STOP = 1;
+  else if (STOP == 1) STOP = 0;
+}
+
+void executeStop() {
+  Serial.print("estop: ");
+  updateMotors();                       
+  mySerial.write(254); // move cursor to beginning of first line
+  mySerial.write(128);
+
+  mySerial.write("                "); // clear display
+  mySerial.write("                ");
+
+  mySerial.write(254); // move cursor to beginning of first line
+  mySerial.write(128);
+
+  mySerial.write("EMERGENCY STOP");
+  Serial.print("EMERGENCY STOP: ");
+
+  while (STOP);
+}
+
+void updateMotors() {
+  for ( byte i = 0 ; i < numMotors ; i++ ) {
+    motor[i].set(signal[i]);
+    motor[i].update();
+  }
+}
